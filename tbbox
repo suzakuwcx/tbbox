@@ -1,0 +1,238 @@
+#!/bin/bash
+readonly sys_dir=("bin" "sbin" "lib" "lib64" "usr" "etc" "sys" "home" "var" "run" "tmp" "dev" "proc")
+readonly ALL_OFF="\e[0m"
+readonly BOLD="\e[1m"
+readonly BLUE="${BOLD}\e[34m"
+readonly GREEN="${BOLD}\e[32m"
+readonly RED="${BOLD}\e[31m"
+readonly YELLOW="${BOLD}\e[33m"
+
+
+config_short=0
+
+
+function msg() {
+    local mesg=$1; shift
+    printf "${GREEN}==>${ALL_OFF}${BOLD} ${mesg}${ALL_OFF}\n" "$@"
+}
+
+
+function msg2() {
+    local mesg=$1; shift
+    printf "${BLUE}  ->${ALL_OFF}${BOLD} ${mesg}${ALL_OFF}\n" "$@"
+}
+
+
+function error() {
+    local mesg=$1; shift
+    printf "${RED}==> $(gettext "ERROR:")${ALL_OFF}${BOLD} ${mesg}${ALL_OFF}\n" "$1" "$2" >&2
+}
+
+
+function usage() {
+cat << EOF
+Create sandbox at current directory
+
+Usage: bbox [OPTION]
+  -h, --help              print usage
+  -c                      check generate file outside working directory
+  -s                      bind the project directory under '~/' to shorten the path
+EOF
+}
+
+
+function is_in_sandbox() {
+    if [[ "$(pidof bwrap)" == "1" ]]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+
+: "
+    get the first system directory from a existing path string
+    global $sys_dir: all system dir
+    $1: path string
+
+    Example:
+    get_first_sys_dir /home/ubuntu/Desktop/Note/1.txt: return /home/ubuntu
+    get_first_sys_dir /opt/Note/1.txt: return /opt/Note
+    get_first_sys_dir /datebase/mysql.db: return /datebase
+"
+
+
+function get_first_sys_dir() {
+    local path=$(realpath ${1})
+    local root=${path}
+
+    while true; do
+        if echo "${root}" | grep -E "^/[^/><|:&]+(/[^/><|:&]+)?$" 1>/dev/null ; then
+            for dir in ${sys_dir[@]}; do
+                if [[ "$(echo "${root}" | cut -d '/' -f 2)" = "${dir}" ]]; then
+                    echo "${root}"
+                    return 0
+                fi
+            done
+        fi
+
+        root="$(realpath ${root}/..)"
+        if [[ -z "${root}" || "${root}" = "/" ]]; then 
+            error "directory not exist!"
+            exit 1;
+        fi
+    done
+}
+
+
+: "
+    create sandbox environment
+    $1: user's home directory at host
+    $2: working directory
+"
+function create_sandbox() {
+    if is_in_sandbox ; then
+        error "you are currenting in a bwrap sandbox"
+        return 1
+    fi
+
+    local home="$1"
+    local working_dir="$2"
+
+    if [[ ! -d "${home}" ]]; then
+        error "home directory '%s' is not exist" "${home}"
+        return 1
+    fi
+
+    if [[ ! -d "${working_dir}" ]]; then
+        error "working directory '%s' is not exist" "${working_dir}"
+        return 1
+    fi
+
+    local sys_first_dir="$(get_first_sys_dir ${working_dir})"
+    local target_dir
+    if ((config_short)) ; then
+        target_dir="${sys_first_dir}/$(basename ${working_dir})"
+    else
+        target_dir="${working_dir}"
+    fi
+
+    msg "warp from '%s' to '%s'" "${working_dir}" "${target_dir}"
+
+    local bwrap_options=(
+        --unshare-all
+        --share-net
+        --die-with-parent
+        --ro-bind /usr /usr
+        --ro-bind /etc /etc
+        --ro-bind /sys /sys
+        --proc /proc
+        --dev /dev
+        --tmpfs /tmp
+        --symlink usr/bin /bin
+        --symlink usr/bin /sbin
+        --symlink usr/lib /lib
+        --symlink usr/lib /lib64
+        --dir "/home"
+        --dir "/run"
+        --dir "/var"
+        --perms 700 --dir "${home}" --dir "${target_dir}"
+        --ro-bind "${home}/.local" "${home}/.local"
+        --ro-bind "${home}/.config" "${home}/.config"
+        --bind "${working_dir}" "${target_dir}" --chdir "${target_dir}" 
+        --setenv HOST_HOME "${home}"
+        --setenv HOST_WORKDIR "${working_dir}"
+        --setenv TARGET_DIR "${target_dir}"
+    )
+
+    PROMPT_COMMAND='PS1="(tbbox) ${PS1}";unset PROMPT_COMMAND' bwrap ${bwrap_options[@]} /bin/bash
+}
+
+
+: " 
+    check if new file was generated in this directory
+    $1: directory path
+"
+function check_generate_file() {
+    if ! is_in_sandbox ; then
+        error "you need to enter into in a bwrap sandbox environment"
+        return 1
+    fi
+
+    local home="${HOST_HOME}"
+    local working_dir="${HOST_WORKDIR}"
+    local target_dir="${TARGET_DIR}"
+
+    local sys_first_dir="$(get_first_sys_dir ${target_dir})"
+
+    local find_opt=(
+        -false 
+    )
+
+
+    # find modification under root directory except system directory
+    for dir in ${sys_dir[@]} ${sys_first_dir}; do
+        find_opt=(${find_opt[@]}" -o -path /${dir}")
+    done
+
+    find "/" \( ${find_opt[@]} \) -prune -o -print | tail -n +2
+
+
+    # find modification under some modifiable system directory 
+    find "/tmp/" | tail -n +2
+    find "/run/" | tail -n +2
+    find "/var/" | tail -n +2
+
+
+    # find under 'home' directory except those readonly one
+    find_opt=(-false)
+    for dir in "${home}/.local" "${home}/.config" "${sys_first_dir}"; do
+        find_opt=(${find_opt[@]}" -o -path ${dir}")
+    done
+
+    find "/home/" \( ${find_opt[@]} \) -prune -o -print | tail -n +3
+
+    # find under the first system directory of the project except the project itself
+    find_opt=(-false)
+    for dir in "${home}/.local" "${home}/.config" "${target_dir}"; do
+        find_opt=(${find_opt[@]}" -o -path ${dir}")
+    done
+    find "${sys_first_dir}" \( ${find_opt[@]} \) -prune -o -print | 
+    (
+        # filter directory
+        while read dir; do
+            [[ "${target_dir}" = "${dir}"* || "${dir}" = "${home}" ]] || echo ${dir}
+        done
+    )
+}
+
+
+function main() {
+    while [[ -n "$1" ]]; do
+        case "$1" in
+            -h|--help)
+                usage
+                exit 1
+                ;;
+            -c)
+                check_generate_file
+                exit 0
+                ;;
+            -s)
+                config_short=1
+                ;;
+            *)
+                printf "Error: Unregonize options \'%s\'\n" "$1" 
+                exit 1
+                ;;
+        esac
+        shift
+    done
+
+    local home_dir=${HOME}
+    local current_dir=$(pwd)
+
+    create_sandbox ${home_dir} ${current_dir}
+}
+
+main "$@"
