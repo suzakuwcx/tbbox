@@ -1,5 +1,5 @@
 #!/bin/bash
-readonly sys_dir=("bin" "sbin" "lib" "lib64" "usr" "etc" "sys" "home" "var" "run" "tmp" "dev" "proc")
+readonly sys_dir=("bin" "sbin" "lib" "lib64" "usr" "etc" "sys" "home" "var" "run" "tmp" "dev" "proc" "opt")
 readonly ALL_OFF="\e[0m"
 readonly BOLD="\e[1m"
 readonly BLUE="${BOLD}\e[34m"
@@ -57,7 +57,7 @@ function is_in_sandbox() {
 
     Example:
     get_first_sys_dir /home/ubuntu/Desktop/Note/1.txt: return /home/ubuntu
-    get_first_sys_dir /opt/Note/1.txt: return /opt/Note
+    get_first_sys_dir /opt/Note/1.txt: return /opt
     get_first_sys_dir /datebase/mysql.db: return /datebase
 "
 
@@ -126,6 +126,7 @@ function create_sandbox() {
         --ro-bind /usr /usr
         --ro-bind /etc /etc
         --ro-bind /sys /sys
+        --ro-bind /opt /opt
         --proc /proc
         --dev /dev
         --tmpfs /tmp
@@ -137,6 +138,7 @@ function create_sandbox() {
         --dir "/run"
         --dir "/var"
         --perms 700 --dir "${home}" --dir "${target_dir}"
+        --ro-bind "${home}/.conda" "${home}/.conda"
         --ro-bind "${home}/.local" "${home}/.local"
         --ro-bind "${home}/.config" "${home}/.config"
         --bind "${working_dir}" "${target_dir}" --chdir "${target_dir}" 
@@ -169,7 +171,6 @@ function check_generate_file() {
         -false 
     )
 
-
     # find modification under root directory except system directory
     for dir in ${sys_dir[@]} ${sys_first_dir}; do
         find_opt=(${find_opt[@]}" -o -path /${dir}")
@@ -186,7 +187,7 @@ function check_generate_file() {
 
     # find under 'home' directory except those readonly one
     find_opt=(-false)
-    for dir in "${home}/.local" "${home}/.config" "${sys_first_dir}"; do
+    for dir in "${home}/.local" "${home}/.config" "${home}/.conda" "${sys_first_dir}"; do
         find_opt=(${find_opt[@]}" -o -path ${dir}")
     done
 
@@ -194,7 +195,7 @@ function check_generate_file() {
 
     # find under the first system directory of the project except the project itself
     find_opt=(-false)
-    for dir in "${home}/.local" "${home}/.config" "${target_dir}"; do
+    for dir in "${home}/.local" "${home}/.config" "${home}/.conda" "${target_dir}"; do
         find_opt=(${find_opt[@]}" -o -path ${dir}")
     done
     find "${sys_first_dir}" \( ${find_opt[@]} \) -prune -o -print | 
